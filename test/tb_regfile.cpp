@@ -3,19 +3,32 @@
 
 #include "Vregfile.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
+#include <cstdint>
 #include <iostream>
 #include <cassert>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vregfile* duv = new Vregfile;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/regfile.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     // Helper lambda to toggle clock
     auto tick = [&]() {
         duv->clk = 0;
-        duv->eval();
+        step();
         duv->clk = 1;
-        duv->eval();
+        step();
     };
 
     // Initialize inputs
@@ -24,11 +37,11 @@ int main(int argc, char** argv) {
     duv->ra2 = 0;
     duv->wa3 = 0;
     duv->wd3 = 0;
-    duv->eval();
+    step();
 
     // Test x0 is always 0
     duv->ra1 = 0;
-    duv->eval();
+    step();
     std::cout << "Read x0: " << duv->rd1 << std::endl;
     assert(duv->rd1 == 0);
 
@@ -41,7 +54,7 @@ int main(int argc, char** argv) {
     // Read x1
     duv->we3 = 0;
     duv->ra1 = 1;
-    duv->eval();
+    step();
     std::cout << "Read x1 (normal): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
     assert(duv->rd1 == 0xDEADBEEF);
 
@@ -55,13 +68,13 @@ int main(int argc, char** argv) {
     duv->wa3 = 2;
     duv->wd3 = 0xCAFEBABE;
     duv->ra1 = 2; // read same cycle
-    duv->eval();
+    step();
     std::cout << "Read x2 (same cycle as write, no bypass): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
     assert(duv->rd1 == 0);
 
     tick(); // actually write it
     duv->we3 = 0;
-    duv->eval();
+    step();
     std::cout << "Read x2 (after clock): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
     assert(duv->rd1 == 0xCAFEBABE);
 
@@ -72,10 +85,12 @@ int main(int argc, char** argv) {
     tick();
     duv->we3 = 0;
     duv->ra1 = 0;
-    duv->eval();
+    step();
     std::cout << "Read x0 after writing to x0: " << duv->rd1 << std::endl;
     assert(duv->rd1 == 0);
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "REGFILE TEST PASSED!" << std::endl;
     return 0;

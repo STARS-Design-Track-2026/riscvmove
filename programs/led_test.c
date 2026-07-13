@@ -3,11 +3,11 @@
 // mirrored across all seven-segment displays with {red,green,blue} driven by
 // the digit ANDed with 0b111, and a speed-up while any pushbutton is held.
 //
-// MMIO map used here (see PROGRAMS.md):
+// MMIO map used here (see PROGRAMS.md / MMIO.md):
 //   0x80000010  LEDs left  (8 bits)
 //   0x80000014  LEDs right (8 bits)
 //   0x80000020 + 4*n  seven-segment display n (n = 0..7), active-high
-//   0x80000040  RGB (bit0=red, bit1=green, bit2=blue)
+//   0x80000040  RGB (bit0=blue, bit1=green, bit2=red -- see MMIO.md section 3)
 //   0x80000050  Pushbuttons, read-only, pb[20:0]
 
 #define LED_LEFT  ((volatile unsigned char *)0x80000010)

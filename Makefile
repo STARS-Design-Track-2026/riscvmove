@@ -12,14 +12,14 @@ PROGRAMS = programs
 C_SRC   = $(PROGRAMS)/sample.c
 BUILD   = ./build
 HEX	    = $(BUILD)/test_program.hex
-SRC	    = top.sv
-ICE   	= ice40hx8k.sv
+SRC	    = src/top.sv
+ICE   	= src/ice40hx8k.sv
 CHK 	= check.bin
 DEM 	= demo.bin
 JSON    = ll.json
 SUP     = support/cells_*.v
 UART	= uart/uart.v uart/uart_tx.v uart/uart_rx.v
-FILES   = $(ICE) $(SRC) $(UART) src/riscvmove_defs.sv src/alu.sv src/regfile.sv src/mem.sv src/riscvmove.sv
+FILES   = $(ICE) $(SRC) $(UART) src/riscvmove_defs.sv src/alu.sv src/regfile.sv src/mem.sv src/pc.sv src/decoder.sv src/imm_gen.sv src/riscvmove.sv
 TRACE	= $(PROJ).vcd
 VOBJ    = $(BUILD)/obj_dir
 MAP = mapped
@@ -54,19 +54,41 @@ check_env:
 	@echo -e "\nEnvironment setup correctly!\n"
 
 #########################
-# Default/canonical program hexes (intermediate build outputs -- never
-# committed). cpu_test.hex is verify_riscvmove's own dedicated copy, derived
-# solely from programs/cpu_test.s, so other flows writing to
-# build/test_program.hex (compile_c, run_c, ...) can never make the
-# regression test see the wrong program. test_program.hex is what actually
-# gets embedded by synth (top.sv's INIT_FILE) and falls back to the same
-# cpu_test.s program if nothing's been compiled into it yet.
+# Default/canonical program hexes
 #
-# Every program produces a *pair* of hex files: <name>.hex for imem (.text
-# only) and <name>_data.hex for dmem (.rodata + .data's initial values --
-# there's no lw/lb/sw path from dmem back into imem's BRAM, so string
-# literals/const arrays and initialized globals alike need their own
-# preloaded copy in dmem (src/mem.sv); see link.ld).
+# default_program.hex is what gets embedded when you just run `make cram`/
+# `make all`/`make flash` without specifying a C_SRC -- led_test.c, since it
+# has a visible effect (blinking LEDs) that can be verified without a serial
+# console. This is deliberately a *separate* file from cpu_test.hex below:
+# that one is verify_riscvmove's own dedicated regression fixture and must
+# always be built from cpu_test.s specifically, regardless of whatever
+# program happens to be the current default flash target -- sharing one file
+# between the two previously caused verify_riscvmove to silently start
+# testing led_test.c instead of cpu_test.s (led_test.c never does the
+# x4<-30 computation tb_riscvmove.cpp checks for, so the test just hangs
+# until timeout and fails its assertion).
+$(BUILD)/default_program.hex: $(PROGRAMS)/led_test.c
+	mkdir -p $(BUILD)
+	riscv64-unknown-elf-gcc -Og -march=rv32i -mabi=ilp32 -nostdlib -T link.ld crt0.s $(PROGRAMS)/led_test.c -o $(BUILD)/default_program.elf
+	riscv64-unknown-elf-objcopy -O binary -j .text $(BUILD)/default_program.elf $(BUILD)/default_program.bin
+	riscv64-unknown-elf-objcopy -O binary -j .rodata -j .data $(BUILD)/default_program.elf $(BUILD)/default_program_data.bin
+	python3 bin2hex.py $(BUILD)/default_program.bin $(BUILD)/default_program.hex 512 unique
+	python3 bin2hex.py $(BUILD)/default_program_data.bin $(BUILD)/default_program_data.hex 256
+
+$(BUILD)/test_program.hex: $(BUILD)/default_program.hex
+	cp $(BUILD)/default_program.hex $(BUILD)/test_program.hex
+	cp $(BUILD)/default_program_data.hex $(BUILD)/test_program_data.hex
+
+# test_program.hex's recipe above produces this as a side effect; this rule
+# just lets other targets depend on it directly.
+$(BUILD)/test_program_data.hex: $(BUILD)/test_program.hex
+
+# verify_riscvmove's own dedicated regression fixture -- always built from
+# cpu_test.s specifically (hand-assembled, no crt0.s -- it has its own
+# _start), independent of build/test_program.hex above. See PROGRAMS.md for
+# why cpu_test.s's specific instruction sequence exists (back-to-back
+# register dependencies, a taken branch, a same-cycle read+write, a
+# store/load round trip, auipc, jal/jalr).
 $(BUILD)/cpu_test.hex: $(PROGRAMS)/cpu_test.s
 	mkdir -p $(BUILD)
 	riscv64-unknown-elf-gcc -Og -march=rv32i -mabi=ilp32 -nostdlib -T link.ld $(PROGRAMS)/cpu_test.s -o $(BUILD)/cpu_test.elf
@@ -74,14 +96,6 @@ $(BUILD)/cpu_test.hex: $(PROGRAMS)/cpu_test.s
 	riscv64-unknown-elf-objcopy -O binary -j .rodata -j .data $(BUILD)/cpu_test.elf $(BUILD)/cpu_test_data.bin
 	python3 bin2hex.py $(BUILD)/cpu_test.bin $(BUILD)/cpu_test.hex 512 unique
 	python3 bin2hex.py $(BUILD)/cpu_test_data.bin $(BUILD)/cpu_test_data.hex 256
-
-$(BUILD)/test_program.hex: $(BUILD)/cpu_test.hex
-	cp $(BUILD)/cpu_test.hex $(BUILD)/test_program.hex
-	cp $(BUILD)/cpu_test_data.hex $(BUILD)/test_program_data.hex
-
-# test_program.hex's recipe above produces this as a side effect; this rule
-# just lets other targets depend on it directly.
-$(BUILD)/test_program_data.hex: $(BUILD)/test_program.hex
 
 #########################
 # Flash to FPGA
@@ -95,7 +109,7 @@ $(BUILD)/$(PROJ).json : $(ICE) $(SRC) $(PINMAP) Makefile $(BUILD)/test_program.h
 
 $(BUILD)/$(PROJ).asc : $(BUILD)/$(PROJ).json
 	# Place and route using nextpnr
-	$(NEXTPNR) --hx8k --package ct256 --pcf $(PINMAP) --asc $(BUILD)/$(PROJ).asc --json $(BUILD)/$(PROJ).json 2> >(sed -e 's/^.* 0 errors$$//' -e '/^Info:/d' -e '/^[ ]*$$/d' 1>&2)
+	$(NEXTPNR) --freq 12 --hx8k --package ct256 --pcf $(PINMAP) --asc $(BUILD)/$(PROJ).asc --json $(BUILD)/$(PROJ).json 2> >(sed -e 's/^.* 0 errors$$//' -e '/^Info:/d' -e '/^[ ]*$$/d' 1>&2)
 
 $(BUILD)/$(PROJ).bin : $(BUILD)/$(PROJ).asc
 	# Convert to bitstream using IcePack
@@ -177,9 +191,9 @@ sim_%_syn: syn_%
 #########################
 # Verilator Tests (Quiet compilation unless it fails)
 verify_alu:
-	@mkdir -p $(BUILD)
+	@mkdir -p $(BUILD) waves
 	@echo Compiling alu...
-	@if ! verilator -Isrc --cc src/alu.sv --exe $(CURDIR)/test/tb_alu.cpp --Mdir $(VOBJ) --build -j -o alu_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/alu.sv --trace-fst --exe $(CURDIR)/test/tb_alu.cpp --Mdir $(VOBJ) --build -j -o alu_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -187,12 +201,13 @@ verify_alu:
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating alu...
 	@$(VOBJ)/alu_test
+	@echo "Open waveforms with: gtkwave waves/alu.fst"
 	@echo
 
 verify_regfile:
-	@mkdir -p $(BUILD)
+	@mkdir -p $(BUILD) waves
 	@echo Compiling regfile...
-	@if ! verilator -Isrc --cc src/regfile.sv --exe $(CURDIR)/test/tb_regfile.cpp --Mdir $(VOBJ) --build -j -o regfile_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/regfile.sv --trace-fst --exe $(CURDIR)/test/tb_regfile.cpp --Mdir $(VOBJ) --build -j -o regfile_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -200,12 +215,13 @@ verify_regfile:
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating regfile...
 	@$(VOBJ)/regfile_test
+	@echo "Open waveforms with: gtkwave waves/regfile.fst"
 	@echo
 
 verify_imem:
-	@mkdir -p $(BUILD)
+	@mkdir -p $(BUILD) waves
 	@echo Compiling imem...
-	@if ! verilator -Isrc --cc src/mem.sv --top-module imem -GDEPTH=4 -GINIT_FILE="\"$(CURDIR)/test/imem_fixture.hex\"" --exe $(CURDIR)/test/tb_imem.cpp --Mdir $(VOBJ) --build -j -o imem_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/mem.sv --top-module imem -GDEPTH=4 -GINIT_FILE="\"$(CURDIR)/test/imem_fixture.hex\"" --trace-fst --exe $(CURDIR)/test/tb_imem.cpp --Mdir $(VOBJ) --build -j -o imem_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -213,12 +229,13 @@ verify_imem:
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating imem...
 	@$(VOBJ)/imem_test
+	@echo "Open waveforms with: gtkwave waves/imem.fst"
 	@echo
 
 verify_dmem:
-	@mkdir -p $(BUILD)
+	@mkdir -p $(BUILD) waves
 	@echo Compiling dmem...
-	@if ! verilator -Isrc --cc src/mem.sv --top-module dmem --exe $(CURDIR)/test/tb_dmem.cpp --Mdir $(VOBJ) --build -j -o dmem_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/mem.sv --top-module dmem --trace-fst --exe $(CURDIR)/test/tb_dmem.cpp --Mdir $(VOBJ) --build -j -o dmem_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -226,11 +243,55 @@ verify_dmem:
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating dmem...
 	@$(VOBJ)/dmem_test
+	@echo "Open waveforms with: gtkwave waves/dmem.fst"
+	@echo
+
+verify_pc:
+	@mkdir -p $(BUILD) waves
+	@echo Compiling pc_reg...
+	@if ! verilator -Isrc --cc src/pc.sv --top-module pc_reg --trace-fst --exe $(CURDIR)/test/tb_pc.cpp --Mdir $(VOBJ) --build -j -o pc_test > $(BUILD)/verilator_compile.log 2>&1; then \
+		cat $(BUILD)/verilator_compile.log; \
+		rm -f $(BUILD)/verilator_compile.log; \
+		exit 1; \
+	fi
+	@rm -f $(BUILD)/verilator_compile.log
+	@echo Simulating pc_reg...
+	@$(VOBJ)/pc_test
+	@echo "Open waveforms with: gtkwave waves/pc.fst"
+	@echo
+
+verify_decoder:
+	@mkdir -p $(BUILD) waves
+	@echo Compiling decoder...
+	@if ! verilator -Isrc --cc src/decoder.sv --trace-fst --exe $(CURDIR)/test/tb_decoder.cpp --Mdir $(VOBJ) --build -j -o decoder_test > $(BUILD)/verilator_compile.log 2>&1; then \
+		cat $(BUILD)/verilator_compile.log; \
+		rm -f $(BUILD)/verilator_compile.log; \
+		exit 1; \
+	fi
+	@rm -f $(BUILD)/verilator_compile.log
+	@echo Simulating decoder...
+	@$(VOBJ)/decoder_test
+	@echo "Open waveforms with: gtkwave waves/decoder.fst"
+	@echo
+
+verify_imm_gen:
+	@mkdir -p $(BUILD) waves
+	@echo Compiling imm_gen...
+	@if ! verilator -Isrc --cc src/imm_gen.sv --trace-fst --exe $(CURDIR)/test/tb_imm_gen.cpp --Mdir $(VOBJ) --build -j -o imm_gen_test > $(BUILD)/verilator_compile.log 2>&1; then \
+		cat $(BUILD)/verilator_compile.log; \
+		rm -f $(BUILD)/verilator_compile.log; \
+		exit 1; \
+	fi
+	@rm -f $(BUILD)/verilator_compile.log
+	@echo Simulating imm_gen...
+	@$(VOBJ)/imm_gen_test
+	@echo "Open waveforms with: gtkwave waves/imm_gen.fst"
 	@echo
 
 verify_riscvmove: $(BUILD)/cpu_test.hex
+	@mkdir -p waves
 	@echo Compiling riscvmove...
-	@if ! verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/cpu_test.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/cpu_test_data.hex\"" --exe $(CURDIR)/test/tb_riscvmove.cpp --Mdir $(VOBJ) --build -j -o riscvmove_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/cpu_test.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/cpu_test_data.hex\"" --trace-fst --exe $(CURDIR)/test/tb_riscvmove.cpp --Mdir $(VOBJ) --build -j -o riscvmove_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -238,15 +299,16 @@ verify_riscvmove: $(BUILD)/cpu_test.hex
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating riscvmove...
 	@$(VOBJ)/riscvmove_test
+	@echo "Open waveforms with: gtkwave waves/cputest.fst"
 	@echo
 
 verify_led_test:
-	@mkdir -p $(BUILD)
+	@mkdir -p $(BUILD) waves
 	@echo Compiling led_test program...
 	@$(MAKE) compile_c C_SRC=$(PROGRAMS)/led_test.c HEX=$(BUILD)/led_test.hex > $(BUILD)/led_test_compile.log 2>&1 || (cat $(BUILD)/led_test_compile.log; rm -f $(BUILD)/led_test_compile.log; exit 1)
 	@rm -f $(BUILD)/led_test_compile.log
 	@echo Compiling led_test simulation...
-	@if ! verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/led_test.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/led_test_data.hex\"" --exe $(CURDIR)/test/tb_riscvmove_led.cpp --Mdir $(VOBJ) --build -j -o riscvmove_led_test > $(BUILD)/verilator_compile.log 2>&1; then \
+	@if ! verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/led_test.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/led_test_data.hex\"" --trace-fst --exe $(CURDIR)/test/tb_riscvmove_led.cpp --Mdir $(VOBJ) --build -j -o riscvmove_led_test > $(BUILD)/verilator_compile.log 2>&1; then \
 		cat $(BUILD)/verilator_compile.log; \
 		rm -f $(BUILD)/verilator_compile.log; \
 		exit 1; \
@@ -254,9 +316,10 @@ verify_led_test:
 	@rm -f $(BUILD)/verilator_compile.log
 	@echo Simulating led_test...
 	@$(VOBJ)/riscvmove_led_test
+	@echo "Open waveforms with: gtkwave waves/ledtest.fst"
 	@echo
 
-verify_all: verify_alu verify_regfile verify_imem verify_dmem verify_riscvmove verify_led_test
+verify_all: verify_alu verify_regfile verify_imem verify_dmem verify_pc verify_decoder verify_imm_gen verify_riscvmove verify_led_test
 	@echo "=================================================="
 	@echo "ALL TESTS PASSED SUCCESSFULLY!"
 	@echo "=================================================="
@@ -367,13 +430,15 @@ run_c:
 	$(MAKE) cram
 
 run_uart:
+	@mkdir -p waves
 	# Compile C code to a hex
 	$(MAKE) compile_c C_SRC=$(PROGRAMS)/uart_sample.c HEX=$(BUILD)/uart_sample.hex
 	# Build and run Verilator UART simulation
-	verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/uart_sample.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/uart_sample_data.hex\"" --exe $(CURDIR)/test/tb_riscvmove_uart.cpp --Mdir $(VOBJ) --build -j -o riscvmove_uart
+	verilator -Isrc --cc src/riscvmove.sv -GINIT_FILE="\"$(BUILD)/uart_sample.hex\"" -GDATA_INIT_FILE="\"$(BUILD)/uart_sample_data.hex\"" --trace-fst --exe $(CURDIR)/test/tb_riscvmove_uart.cpp --Mdir $(VOBJ) --build -j -o riscvmove_uart
 	$(VOBJ)/riscvmove_uart
+	@echo "Open waveforms with: gtkwave waves/uart.fst"
 
 #########################
 # Clean Up
 clean:
-	rm -rf build/ obj_dir/ *.fst *.vcd verilog.log abc.history mapped/
+	rm -rf build/ obj_dir/ *.fst *.vcd *.log abc.history mapped/

@@ -4,25 +4,38 @@
 
 #include "Vdmem.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
+#include <cstdint>
 #include <iostream>
 #include <cassert>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vdmem* duv = new Vdmem;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/dmem.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     auto tick = [&]() {
         duv->memclk = 0;
-        duv->eval();
+        step();
         duv->memclk = 1;
-        duv->eval();
+        step();
     };
 
     duv->addr_b = 0;
     duv->din_b = 0;
     duv->be_b = 0;
     duv->we_b = 0;
-    duv->eval();
+    step();
 
     // Write commits on this edge, but the read is registered too -- dout_b
     // captures the *pre-write* value of mem[addr_b] on the same edge as the
@@ -60,6 +73,8 @@ int main(int argc, char** argv) {
     tick();
     assert(duv->dout_b == 0);
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "DMEM TEST PASSED!" << std::endl;
     return 0;

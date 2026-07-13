@@ -13,13 +13,26 @@
 
 #include "Vriscvmove.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
+#include <cstdint>
 #include <iostream>
 #include <fstream>
 #include <cassert>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vriscvmove* duv = new Vriscvmove;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/cputest.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     // Start just before phase would wrap to 0, so the first memclk_posedge()
     // call below correctly represents phase 0 (clk's own rising edge).
@@ -34,16 +47,16 @@ int main(int argc, char** argv) {
     // see), then phase/clk update, same as the real registers would.
     auto memclk_posedge = [&]() {
         duv->memclk = 1;
-        duv->eval();
+        step();
         phase_state = (phase_state + 1) % 4;
         duv->phase = phase_state;
         duv->clk = (phase_state == 0 || phase_state == 1) ? 1 : 0;
-        duv->eval();
+        step();
     };
 
     auto memclk_negedge = [&]() {
         duv->memclk = 0;
-        duv->eval();
+        step();
     };
 
     // One full clk period: 4 memclk periods. phase 0's posedge commits
@@ -61,7 +74,7 @@ int main(int argc, char** argv) {
     duv->reset = 1;
     tick();
     duv->reset = 0;
-    duv->eval();
+    step();
 
     std::cout << "Starting CPU Simulation...\n";
 
@@ -91,6 +104,8 @@ int main(int argc, char** argv) {
     assert(x4_correct);
     std::cout << "Verified: Register x4 was successfully loaded with 30!\n";
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "RISCVMOVE CPU TEST PASSED!" << std::endl;
     return 0;

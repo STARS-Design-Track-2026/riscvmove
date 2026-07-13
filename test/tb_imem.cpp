@@ -5,29 +5,42 @@
 
 #include "Vimem.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
+#include <cstdint>
 #include <iostream>
 #include <cassert>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vimem* duv = new Vimem;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/imem.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     duv->memclk = 0;
     duv->addr_a = 0;
-    duv->eval();
+    step();
     assert(duv->dout_a == 0); // nothing captured yet
 
     // A rising edge alone must not update dout_a -- this module reads on
     // the falling edge specifically (see imem.sv for why).
     duv->addr_a = 0;
     duv->memclk = 1;
-    duv->eval();
+    step();
     assert(duv->dout_a == 0);
     std::cout << "Rising edge alone leaves dout_a unchanged\n";
 
     // The following falling edge captures mem[addr_a].
     duv->memclk = 0;
-    duv->eval();
+    step();
     std::cout << "Falling edge: dout_a = 0x" << std::hex << duv->dout_a << std::dec << std::endl;
     assert(duv->dout_a == 0xdeadbeef);
 
@@ -35,24 +48,26 @@ int main(int argc, char** argv) {
     // rising edge). Confirm the new word is captured on the *next* falling
     // edge, not immediately and not on the intervening rising edge.
     duv->addr_a = 4;
-    duv->eval();
+    step();
     assert(duv->dout_a == 0xdeadbeef); // still the old word, no edge yet
     duv->memclk = 1;
-    duv->eval();
+    step();
     assert(duv->dout_a == 0xdeadbeef); // rising edge doesn't act
     duv->memclk = 0;
-    duv->eval();
+    step();
     std::cout << "Read word 1: 0x" << std::hex << duv->dout_a << std::dec << std::endl;
     assert(duv->dout_a == 0xcafebabe);
 
     duv->addr_a = 12;
     duv->memclk = 1;
-    duv->eval();
+    step();
     duv->memclk = 0;
-    duv->eval();
+    step();
     std::cout << "Read word 3: 0x" << std::hex << duv->dout_a << std::dec << std::endl;
     assert(duv->dout_a == 0x12345678);
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "IMEM TEST PASSED!" << std::endl;
     return 0;

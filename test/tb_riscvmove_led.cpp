@@ -7,13 +7,25 @@
 
 #include "Vriscvmove.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
 #include <cassert>
 #include <cstdint>
 #include <iostream>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vriscvmove* duv = new Vriscvmove;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/ledtest.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     int phase_state = 3;
     duv->memclk = 0;
@@ -28,7 +40,7 @@ int main(int argc, char** argv) {
 
     auto memclk_posedge = [&]() {
         duv->memclk = 1;
-        duv->eval();
+        step();
 
         if (phase_state == 2 && duv->mmio_we) {
             const uint32_t addr = duv->mmio_addr;
@@ -43,13 +55,13 @@ int main(int argc, char** argv) {
         phase_state = (phase_state + 1) % 4;
         duv->phase = phase_state;
         duv->clk = (phase_state == 0 || phase_state == 1) ? 1 : 0;
-        duv->eval();
+        step();
     };
 
     auto memclk_negedge = [&]() {
         duv->memclk = 0;
         duv->mmio_din = (duv->mmio_addr == 0x80000050) ? 0 : 0;
-        duv->eval();
+        step();
     };
 
     auto tick = [&]() {
@@ -62,7 +74,7 @@ int main(int argc, char** argv) {
     duv->reset = 1;
     tick();
     duv->reset = 0;
-    duv->eval();
+    step();
 
     for (int cycles = 0; cycles < 200; cycles++) {
         tick();
@@ -74,6 +86,8 @@ int main(int argc, char** argv) {
     assert(saw_ss0);
     assert(saw_rgb);
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "LED TEST PROGRAM PASSED!" << std::endl;
     return 0;

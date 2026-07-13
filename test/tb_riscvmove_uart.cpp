@@ -11,13 +11,26 @@
 
 #include "Vriscvmove.h"
 #include "verilated.h"
+#include "verilated_fst_c.h"
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <queue>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     Vriscvmove* duv = new Vriscvmove;
+
+    VerilatedFstC* tfp = new VerilatedFstC;
+    duv->trace(tfp, 99);
+    tfp->open("waves/uart.fst");
+    uint64_t sim_time = 0;
+    auto step = [&]() {
+        duv->eval();
+        tfp->dump(sim_time);
+        sim_time++;
+    };
 
     int phase_state = 3;
     duv->memclk = 0;
@@ -27,7 +40,7 @@ int main(int argc, char** argv) {
 
     auto memclk_posedge = [&]() {
         duv->memclk = 1;
-        duv->eval();
+        step();
 
         // Sample mmio_we/mmio_addr/mmio_dout right here, at the instant
         // memclk rises but before phase/clk update -- this is exactly
@@ -48,12 +61,12 @@ int main(int argc, char** argv) {
         phase_state = (phase_state + 1) % 4;
         duv->phase = phase_state;
         duv->clk = (phase_state == 0 || phase_state == 1) ? 1 : 0;
-        duv->eval();
+        step();
     };
 
     auto memclk_negedge = [&]() {
         duv->memclk = 0;
-        duv->eval();
+        step();
 
         // imem captures the instruction here (phase 0's negedge); once
         // instr is fresh, mmio_addr reflects the current instruction, in
@@ -62,7 +75,7 @@ int main(int argc, char** argv) {
         if (duv->mmio_addr == 0x80000004) {
             duv->mmio_din = 0x1; // TX always ready
         }
-        duv->eval();
+        step();
     };
 
     auto tick = [&]() {
@@ -76,7 +89,7 @@ int main(int argc, char** argv) {
     duv->reset = 1;
     tick();
     duv->reset = 0;
-    duv->eval();
+    step();
 
     std::cout << "[SIM] Starting CPU Simulation...\n";
     std::cout << "--------------------------------------------------\n";
@@ -99,6 +112,8 @@ int main(int argc, char** argv) {
         std::cout << "\n[SIM] Timeout reached (100000 cycles).\n";
     }
 
+    tfp->close();
+    delete tfp;
     delete duv;
     std::cout << "[SIM] Simulation finished.\n";
     return 0;
