@@ -19,7 +19,7 @@ def mix32(i):
     x ^= x >> 16
     return x
 
-def bin_to_hex(bin_path, hex_path, max_words=512, pad_mode="nop"):
+def bin_to_hex(bin_path, hex_path, max_words=512, pad_mode="nop", salt=0):
     try:
         with open(bin_path, "rb") as f:
             data = f.read()
@@ -43,10 +43,23 @@ def bin_to_hex(bin_path, hex_path, max_words=512, pad_mode="nop"):
     # pads with a non-repeating pattern -- required for icebram swapping
     # (see mix32 above), and safe here because this region is otherwise
     # untouched stack/unused space that gets overwritten before any real use.
+    #
+    # salt shifts the index fed to mix32 so that two *different* memories
+    # padded independently (e.g. imem and dmem, both called with the same
+    # max_words=256-word column size and both starting their padding loop
+    # at a small index) can never produce identical padding words at the
+    # same position. Without it, imem's first 256-word column and dmem
+    # (also 256 words) both compute mix32(i) for whatever tail of indices
+    # past their real content is left, and since that's the *same* i for
+    # both, they emit bit-identical padding there -- which icebram then
+    # reports as an unresolvable "Conflicting from pattern" between the two
+    # regions instead of a clean, unique match. Callers must pick disjoint
+    # salt ranges per memory (see Makefile) so mix32(i + salt) can never
+    # collide across them.
     n = len(words)
     while len(words) < max_words:
         if pad_mode == "unique":
-            words.append(mix32(len(words)))
+            words.append(mix32(len(words) + salt))
         else:
             words.append(0x00000013)
 
@@ -59,7 +72,7 @@ def bin_to_hex(bin_path, hex_path, max_words=512, pad_mode="nop"):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python3 bin2hex.py <input.bin> <output.hex> [max_words] [pad_mode]")
+        print("Usage: python3 bin2hex.py <input.bin> <output.hex> [max_words] [pad_mode] [salt]")
         sys.exit(1)
 
     max_w = 512
@@ -70,4 +83,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 4:
         mode = sys.argv[4]
 
-    bin_to_hex(sys.argv[1], sys.argv[2], max_w, mode)
+    pad_salt = 0
+    if len(sys.argv) > 5:
+        pad_salt = int(sys.argv[5], 0)
+
+    bin_to_hex(sys.argv[1], sys.argv[2], max_w, mode, pad_salt)

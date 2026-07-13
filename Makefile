@@ -179,13 +179,13 @@ sim_%_syn: syn_%
 	fi
 	@echo -e "\nCompilation complete!\n"
 	@echo -e "Simulating synthesized design...\n\n"
-	@vvp -l vvp_sim.log $(BUILD)/$*_tb
+	@vvp -l vvp_sim.log $(BUILD)/$*_tb -fst
 	@echo -e "\nSimulation complete!\n"
 	@echo -e "\nOpening waveforms...\n"
 	@if [ -f waves/$*.gtkw ]; then \
 		gtkwave waves/$*.gtkw; \
 	else \
-		gtkwave waves/$*.vcd; \
+		gtkwave waves/$*.fst; \
 	fi
 
 #########################
@@ -343,13 +343,32 @@ verify_all: verify_alu verify_regfile verify_imem verify_dmem verify_pc verify_d
 # constant. PAD_MODE=nop remains available (pass it explicitly) if you need
 # a stray PC to land on guaranteed-harmless NOPs instead, but only use it for
 # a build that will never later be an icebram base for another program.
-# dmem's hex always uses PAD_MODE=nop regardless -- it has a real write port
-# (Yosys can't fold a bit "constant" when runtime stores can change it), and
-# icebram never touches it anyway, since run_c only ever swaps a program's
-# *code*; if a new program's .rodata/.data differ from what's currently in
-# dmem, use run_from_scratch_c instead (see run_c's own comment below).
+#
+# DATA_PAD_MODE is the same knob for dmem's hex. It defaults to nop, since
+# most callers of compile_c (run_from_scratch_c, verify_led_test, run_uart)
+# never hand their output to icebram and would rather a stray dmem read past
+# the end of .rodata/.data land on a predictable zero than a pseudorandom
+# value. run_c below overrides this to "unique" -- exactly the imem
+# reasoning above applies to dmem's padding column once you actually want
+# icebram to be able to swap it, which it now does (dmem does have a write
+# port, but that only stops Yosys from *constant-folding* a bit; it does
+# nothing for icebram's own column-collision check, which is purely
+# content-based and doesn't know or care whether the BRAM is writable).
 # Usage: make compile_c C_SRC=programs/sample.c HEX=build/test_program.hex
 PAD_MODE = unique
+DATA_PAD_MODE = nop
+
+# bin2hex.py's "unique" padding is mix32(index), a pure function of a
+# memory's own local word index -- so imem's first 256-word column and
+# dmem (also exactly 256 words) independently compute the *same* mix32(i)
+# for whatever tail of indices lies past each one's real content, and end
+# up with bit-identical padding there. icebram then can't tell dmem's
+# "from" pattern apart from imem's column 0 and refuses with a "Conflicting
+# from pattern" error instead of doing a clean swap. DMEM_PAD_SALT shifts
+# dmem's padding into an index range (65536-65791) far outside imem's
+# (0-511), so the two can never coincide. Only matters when
+# DATA_PAD_MODE=unique (nop padding ignores the salt entirely).
+DMEM_PAD_SALT = 65536
 
 compile_c:
 	mkdir -p $(BUILD)
@@ -357,13 +376,26 @@ compile_c:
 	riscv64-unknown-elf-objcopy -O binary -j .text $(BUILD)/program.elf $(BUILD)/program.bin
 	riscv64-unknown-elf-objcopy -O binary -j .rodata -j .data $(BUILD)/program.elf $(BUILD)/program_data.bin
 	python3 bin2hex.py $(BUILD)/program.bin $(HEX) 512 $(PAD_MODE)
-	python3 bin2hex.py $(BUILD)/program_data.bin $(HEX:.hex=_data.hex) 256 nop
+	python3 bin2hex.py $(BUILD)/program_data.bin $(HEX:.hex=_data.hex) 256 $(DATA_PAD_MODE) $(DMEM_PAD_SALT)
 	@echo "=================================================="
 	@echo "SUCCESSFULLY COMPILED $(C_SRC) TO $(HEX) (+ $(HEX:.hex=_data.hex))!"
 	@echo "=================================================="
 
 # Compile -> hex -> flash to FPGA
+#
+# Ensures default_program.hex is up to date *before* compile_c stages HEX
+# (normally build/test_program.hex). Without this, if default_program.hex
+# happened to be stale (missing, or programs/led_test.c touched since it was
+# last built), the recursive `make cram` below would rebuild it as a side
+# effect of resolving test_program.hex's own prerequisite chain
+# (test_program.hex: default_program.hex) -- giving default_program.hex a
+# newer mtime than the file compile_c just wrote, which makes Make consider
+# test_program.hex stale too and silently re-copy it from default_program.hex,
+# clobbering C_SRC's compiled output with led_test.c's right before synthesis
+# reads it. Pre-building default_program.hex here means it's never the
+# younger file at the moment that matters.
 run_from_scratch_c:
+	$(MAKE) $(BUILD)/default_program.hex
 	# Compile C code to hex (if C_SRC is set by user do not change it)
 	make compile_c C_SRC=$(C_SRC) HEX=$(HEX)
 	# Build and flash to FPGA
@@ -377,7 +409,11 @@ run_from_scratch_c:
 # "from" pattern into 256-word-aligned columns per bit position and errors
 # out if any two columns collide. NOP padding makes every all-NOP 256-word
 # chunk identical to every other one, which always collides -- so anything
-# this target embeds must use PAD_MODE=unique instead.
+# this target embeds must use PAD_MODE=unique instead. This target compiles
+# C_SRC with DATA_PAD_MODE=unique too (overriding the nop default), for
+# exactly the same reason applied to dmem's padding column: it's the only
+# way icebram can locate and replace dmem's content the same way it does
+# imem's.
 #
 # EMBEDDED_HEX/EMBEDDED_DATA_HEX track the exact (unique-padded) imem/dmem
 # content currently believed to be in build/riscvmove.asc. If either is
@@ -386,25 +422,38 @@ run_from_scratch_c:
 # trust icebram to find anything reliably, so we force one fresh synth+P&R
 # with C_SRC embedded directly instead. The same is true if any hardware
 # source changed after the current .asc was built: icebram can only swap
-# code bytes, not rebuild logic.
+# code/data bytes, not rebuild logic.
 #
-# icebram itself only ever gets handed imem's before/after hex pair
-# (EMBEDDED_HEX/RUNC_HEX) -- it has no equivalent way to patch dmem's real
-# BRAM content, so C_SRC is always compiled first (both code and data) and
-# its *data* image is compared against EMBEDDED_DATA_HEX before deciding
-# which path to take. A mismatch there used to be silently ignored -- the
-# icebram path would swap in new code that assumes different .rodata/.data
-# while dmem still physically held whatever the previous program's initial
-# values were (e.g. a lookup table read would return an unrelated program's
-# leftover string bytes instead of its own constants) -- so it now forces
-# the same fresh synth+P&R path as an imem mismatch would.
+# The fresh-rebuild branch below pre-builds default_program.hex before
+# staging test_program.hex with C_SRC's own output, and reads EMBEDDED_HEX/
+# EMBEDDED_DATA_HEX back from RUNC_HEX/RUNC_DATA_HEX rather than from
+# test_program*.hex post-synth -- see run_from_scratch_c's comment above for
+# why (test_program.hex: default_program.hex can silently reassert itself
+# and clobber a manually-staged file mid-recipe otherwise).
+#
+# Otherwise, C_SRC's code and data are each icebram-swapped in independently:
+# imem always gets swapped (EMBEDDED_HEX -> RUNC_HEX), and dmem only gets a
+# second icebram pass if its content would actually change (EMBEDDED_DATA_HEX
+# != RUNC_DATA_HEX) -- skipping a no-op swap when a new program happens to
+# have identical .rodata/.data to what's already embedded. Older versions of
+# this target treated *any* .data mismatch as a reason to force a full
+# resynth, back when icebram had no way to touch dmem at all (dmem's hex was
+# always nop-padded, which icebram can never disambiguate); now that dmem's
+# hex uses the same unique-padding trick as imem, both regions can be swapped
+# in one pass without ever re-running synthesis/place-and-route.
 run_c:
-	@$(MAKE) compile_c C_SRC=$(C_SRC) HEX=$(RUNC_HEX) PAD_MODE=unique; \
+	@$(MAKE) compile_c C_SRC=$(C_SRC) HEX=$(RUNC_HEX) PAD_MODE=unique DATA_PAD_MODE=unique; \
+	icebram_swap() { \
+		from="$$1"; to="$$2"; label="$$3"; \
+		if ! icebram "$$from" "$$to" < $(BUILD)/$(PROJ).asc > $(BUILD)/$(PROJ)_runc.asc || [ ! -s $(BUILD)/$(PROJ)_runc.asc ]; then \
+			rm -f $(BUILD)/$(PROJ)_runc.asc; \
+			echo "icebram failed to swap $$label -- leaving $(BUILD)/$(PROJ).asc untouched (not flashing)." >&2; \
+			exit 1; \
+		fi; \
+		mv $(BUILD)/$(PROJ)_runc.asc $(BUILD)/$(PROJ).asc; \
+	}; \
 	need_rebuild=0; \
 	if [ ! -s $(BUILD)/$(PROJ).asc ] || [ ! -s $(EMBEDDED_HEX) ] || [ ! -s $(EMBEDDED_DATA_HEX) ] || [ $(BUILD)/$(PROJ).asc -nt $(EMBEDDED_HEX) ]; then \
-		need_rebuild=1; \
-	fi; \
-	if ! cmp -s $(RUNC_DATA_HEX) $(EMBEDDED_DATA_HEX); then \
 		need_rebuild=1; \
 	fi; \
 	for dep in $(RUNC_HW_DEPS); do \
@@ -414,18 +463,25 @@ run_c:
 		fi; \
 	done; \
 	if [ $$need_rebuild -eq 1 ]; then \
-		echo "No icebram-compatible bitstream on hand (or dmem/.data would differ) -- synthesizing fresh with $(C_SRC) embedded directly."; \
+		echo "No icebram-compatible bitstream on hand (or hardware changed) -- synthesizing fresh with $(C_SRC) embedded directly."; \
+		$(MAKE) $(BUILD)/default_program.hex; \
 		cp $(RUNC_HEX) $(BUILD)/test_program.hex; \
 		cp $(RUNC_DATA_HEX) $(BUILD)/test_program_data.hex; \
 		rm -f $(BUILD)/$(PROJ).json $(BUILD)/$(PROJ).asc $(BUILD)/$(PROJ).bin; \
 		$(MAKE) $(BUILD)/$(PROJ).asc; \
-		cp $(BUILD)/test_program.hex $(EMBEDDED_HEX); \
-		cp $(BUILD)/test_program_data.hex $(EMBEDDED_DATA_HEX); \
-	else \
-		echo "Swapping $(C_SRC)'s code into the existing bitstream via icebram (dmem/.data already matches)."; \
-		icebram $(EMBEDDED_HEX) $(RUNC_HEX) < $(BUILD)/$(PROJ).asc > $(BUILD)/$(PROJ)_runc.asc; \
-		mv $(BUILD)/$(PROJ)_runc.asc $(BUILD)/$(PROJ).asc; \
 		cp $(RUNC_HEX) $(EMBEDDED_HEX); \
+		cp $(RUNC_DATA_HEX) $(EMBEDDED_DATA_HEX); \
+	else \
+		echo "Swapping $(C_SRC)'s code into the existing bitstream via icebram."; \
+		icebram_swap $(EMBEDDED_HEX) $(RUNC_HEX) "imem/code"; \
+		cp $(RUNC_HEX) $(EMBEDDED_HEX); \
+		if ! cmp -s $(RUNC_DATA_HEX) $(EMBEDDED_DATA_HEX); then \
+			echo "Swapping $(C_SRC)'s .rodata/.data into the existing bitstream via icebram."; \
+			icebram_swap $(EMBEDDED_DATA_HEX) $(RUNC_DATA_HEX) "dmem/data"; \
+			cp $(RUNC_DATA_HEX) $(EMBEDDED_DATA_HEX); \
+		else \
+			echo "$(C_SRC)'s .rodata/.data already matches the existing bitstream -- no dmem swap needed."; \
+		fi; \
 	fi
 	$(MAKE) cram
 
