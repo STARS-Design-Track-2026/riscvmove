@@ -32,31 +32,31 @@ int main(int argc, char** argv) {
     };
 
     // Initialize inputs
-    duv->we3 = 0;
-    duv->ra1 = 0;
-    duv->ra2 = 0;
-    duv->wa3 = 0;
-    duv->wd3 = 0;
+    duv->we = 0;
+    duv->rs1_idx = 0;
+    duv->rs2_idx = 0;
+    duv->rd_idx = 0;
+    duv->rd = 0;
     step();
 
     // Test x0 is always 0
-    duv->ra1 = 0;
+    duv->rs1_idx = 0;
     step();
-    std::cout << "Read x0: " << duv->rd1 << std::endl;
-    assert(duv->rd1 == 0);
+    std::cout << "Read x0: " << duv->rs1 << std::endl;
+    assert(duv->rs1 == 0);
 
     // Write to x1
-    duv->we3 = 1;
-    duv->wa3 = 1;
-    duv->wd3 = 0xDEADBEEF;
+    duv->we = 1;
+    duv->rd_idx = 1;
+    duv->rd = 0xDEADBEEF;
     tick(); // Posited edge updates rf[1]
 
     // Read x1
-    duv->we3 = 0;
-    duv->ra1 = 1;
+    duv->we = 0;
+    duv->rs1_idx = 1;
     step();
-    std::cout << "Read x1 (normal): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
-    assert(duv->rd1 == 0xDEADBEEF);
+    std::cout << "Read x1 (normal): 0x" << std::hex << duv->rs1 << std::dec << std::endl;
+    assert(duv->rs1 == 0xDEADBEEF);
 
     // Test no bypass: writing to x2 and reading from x2 in the same cycle
     // must see the OLD stored value (0, since x2 was never written before),
@@ -64,30 +64,30 @@ int main(int argc, char** argv) {
     // for instructions like `addi x5,x5,1` that read and write the same
     // register in one cycle (see regfile.sv for why a bypass would instead
     // create a combinational loop there).
-    duv->we3 = 1;
-    duv->wa3 = 2;
-    duv->wd3 = 0xCAFEBABE;
-    duv->ra1 = 2; // read same cycle
+    duv->we = 1;
+    duv->rd_idx = 2;
+    duv->rd = 0xCAFEBABE;
+    duv->rs1_idx = 2; // read same cycle
     step();
-    std::cout << "Read x2 (same cycle as write, no bypass): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
-    assert(duv->rd1 == 0);
+    std::cout << "Read x2 (same cycle as write, no bypass): 0x" << std::hex << duv->rs1 << std::dec << std::endl;
+    assert(duv->rs1 == 0);
 
     tick(); // actually write it
-    duv->we3 = 0;
+    duv->we = 0;
     step();
-    std::cout << "Read x2 (after clock): 0x" << std::hex << duv->rd1 << std::dec << std::endl;
-    assert(duv->rd1 == 0xCAFEBABE);
+    std::cout << "Read x2 (after clock): 0x" << std::hex << duv->rs1 << std::dec << std::endl;
+    assert(duv->rs1 == 0xCAFEBABE);
 
     // Test writing to x0 doesn't do anything
-    duv->we3 = 1;
-    duv->wa3 = 0;
-    duv->wd3 = 0x12345678;
+    duv->we = 1;
+    duv->rd_idx = 0;
+    duv->rd = 0x12345678;
     tick();
-    duv->we3 = 0;
-    duv->ra1 = 0;
+    duv->we = 0;
+    duv->rs1_idx = 0;
     step();
-    std::cout << "Read x0 after writing to x0: " << duv->rd1 << std::endl;
-    assert(duv->rd1 == 0);
+    std::cout << "Read x0 after writing to x0: " << duv->rs1 << std::endl;
+    assert(duv->rs1 == 0);
 
     tfp->close();
     delete tfp;

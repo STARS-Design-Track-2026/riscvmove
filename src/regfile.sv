@@ -5,13 +5,13 @@
 
 module regfile (
   input  logic        clk,
-  input  logic        we3,
-  input  logic [4:0]  ra1,
-  input  logic [4:0]  ra2,
-  input  logic [4:0]  wa3,
-  input  logic [31:0] wd3,
-  output logic [31:0] rd1,
-  output logic [31:0] rd2
+  input  logic        we,
+  input  logic [4:0]  rs1_idx,
+  input  logic [4:0]  rs2_idx,
+  input  logic [4:0]  rd_idx,
+  input  logic [31:0] rd,
+  output logic [31:0] rs1,
+  output logic [31:0] rs2
 );
 
 
