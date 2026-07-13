@@ -7,6 +7,9 @@
 `include "alu.sv"
 `include "regfile.sv"
 `include "mem.sv"
+`include "pc.sv"
+`include "decoder.sv"
+`include "imm_gen.sv"
 
 module riscvmove #(
   parameter INIT_FILE      = "", // .text/.rodata image for imem
