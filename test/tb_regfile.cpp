@@ -32,6 +32,7 @@ int main(int argc, char** argv) {
     };
 
     // Initialize inputs
+    duv->reset = 0;
     duv->we = 0;
     duv->rs1_idx = 0;
     duv->rs2_idx = 0;
@@ -88,6 +89,47 @@ int main(int argc, char** argv) {
     step();
     std::cout << "Read x0 after writing to x0: " << duv->rs1 << std::endl;
     assert(duv->rs1 == 0);
+
+    // Test asynchronous reset: x1 and x2 both hold nonzero values from
+    // earlier in this test (0xDEADBEEF, 0xCAFEBABE). Assert reset with NO
+    // clock edge at all -- step() only calls eval(), it never toggles clk
+    // -- to specifically prove this clears storage independent of clk, not
+    // merely on the next rising edge the way a synchronous reset would.
+    duv->we = 0;
+    duv->reset = 1;
+    step();
+    duv->rs1_idx = 1;
+    duv->rs2_idx = 2;
+    step();
+    std::cout << "Read x1, x2 immediately after reset (no clock edge): 0x"
+              << std::hex << duv->rs1 << ", 0x" << duv->rs2 << std::dec << std::endl;
+    assert(duv->rs1 == 0);
+    assert(duv->rs2 == 0);
+
+    // Reset should hold storage at 0 the whole time it's asserted, even
+    // across clock edges with we high (reset must take priority over a
+    // write, not race it).
+    duv->we = 1;
+    duv->rd_idx = 1;
+    duv->rd = 0xFFFFFFFF;
+    tick();
+    duv->we = 0;
+    step();
+    std::cout << "Read x1 (write attempted while reset still held): 0x"
+              << std::hex << duv->rs1 << std::dec << std::endl;
+    assert(duv->rs1 == 0);
+
+    // Deasserting reset should let normal writes resume immediately.
+    duv->reset = 0;
+    duv->we = 1;
+    duv->rd_idx = 1;
+    duv->rd = 0x11223344;
+    tick();
+    duv->we = 0;
+    step();
+    std::cout << "Read x1 (normal write after reset released): 0x"
+              << std::hex << duv->rs1 << std::dec << std::endl;
+    assert(duv->rs1 == 0x11223344);
 
     tfp->close();
     delete tfp;

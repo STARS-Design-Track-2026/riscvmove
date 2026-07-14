@@ -5,6 +5,7 @@
 
 module regfile (
   input  logic        clk,
+  input  logic        reset,
   input  logic        we,
   input  logic [4:0]  rs1_idx,
   input  logic [4:0]  rs2_idx,
