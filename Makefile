@@ -105,7 +105,7 @@ $(BUILD)/$(PROJ).json : $(ICE) $(SRC) $(PINMAP) Makefile $(BUILD)/test_program.h
 	# if build folder doesn't exist, create it
 	mkdir -p $(BUILD)
 	# synthesize using Yosys
-	$(YOSYS) -p "read_verilog -Isrc -sv -noblackbox $(FILES); synth_ice40 -top ice40hx8k -json $(BUILD)/$(PROJ).json"
+	$(YOSYS) -p "read_verilog -Isrc -sv -noblackbox $(FILES); synth_ice40 -top ice40hx8k; write_json -noscopeinfo $(BUILD)/$(PROJ).json"
 
 $(BUILD)/$(PROJ).asc : $(BUILD)/$(PROJ).json
 	# Place and route using nextpnr
