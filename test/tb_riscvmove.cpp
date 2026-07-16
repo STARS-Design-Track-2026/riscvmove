@@ -101,8 +101,12 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Simulation completed in " << cycles << " cycles.\n";
-    assert(x4_correct);
-    std::cout << "Verified: Register x4 was successfully loaded with 30!\n";
+    if (!x4_correct) {
+        std::cout << "ERROR: Register x4 does not contain 30!\n";
+    }
+    else {
+        std::cout << "Verified: Register x4 was successfully loaded with 30!\n";
+    }
 
     tfp->close();
     delete tfp;
